@@ -25,7 +25,7 @@ The system below addresses both: a high-recall detector produces ground truth ch
 
 ## Pipeline overview
 
-![End-to-end pipeline](./assets/architecture.svg)
+![End-to-end pipeline](./assets/full-workflow.png)
 
 The WSI is tiled, astrocytes are detected with YOLOv5, those detections are converted directly into segmentation masks, and a UNet — whose encoder is pre-trained on unlabeled tissue with SimCLR — produces the final per-cell mask used for density and clinical readouts.
 
@@ -39,7 +39,7 @@ Against expert manual annotation the detector reproduces astrocyte locations acr
 
 ## Stage B — Masks directly from detections
 
-![Mask generation](./assets/mask-generation.svg)
+![Mask generation](./assets/mask-generation.png)
 
 Instead of a separate weak-label pipeline, segmentation masks are **constructed directly from the detection annotations (COCO format)**. For every bounding box:
 
@@ -54,7 +54,7 @@ The result is a **full-image binary mask** (`0 = background`, `1 = astrocyte`) �
 
 ## Stage C — Self-supervised pre-training (SimCLR)
 
-![SimCLR pre-training](./assets/simclr-pretraining.svg)
+![SimCLR pre-training](./assets/simclr-pipeline.png)
 
 Because annotated masks are scarce, a **ResNet18** encoder is first pre-trained on **unlabeled** brain-tissue tiles using **SimCLR** contrastive learning. Two augmented views of each tile are pushed through a shared encoder and a 512 → 128 MLP projection head, and an **NT-Xent** loss (τ = 0.1) pulls matching views together while pushing others apart.
 
@@ -69,8 +69,6 @@ The learned weights initialize the segmentation encoder, so the segmenter starts
 
 ## Stage D — Segmentation (UNet + SimCLR)
 
-![UNet with SimCLR encoder](./assets/unet-simclr.svg)
-
 The segmentation model is a **UNet** whose encoder is the SimCLR-pretrained ResNet18. Four upsampling blocks with **skip connections** from the encoder stages recover spatial detail, and a final upsampling layer returns to the full **512 × 512** resolution. Training uses **`BCEWithLogitsLoss(pos_weight = 10)`** to counter the heavy background/foreground imbalance.
 
 | Setting | Value |
@@ -80,7 +78,7 @@ The segmentation model is a **UNet** whose encoder is the SimCLR-pretrained ResN
 | Optimizer | Adam · lr 3e-4 · ReduceLROnPlateau (factor 0.1, patience 3) |
 | Inference | sigmoid → threshold 0.5 (optional multi-checkpoint ensemble) |
 
-Inference applies a sigmoid to the logits; an ensemble that averages probabilities across checkpoints is available for extra robustness.
+Inference applies a sigmoid to the logits; an ensemble that averages probabilities across checkpoints is available for extra robustness. The full encoder/decoder architecture, training setup, and performance are shown in the [end-to-end workflow diagram](#pipeline-overview) above.
 
 ---
 
@@ -118,4 +116,4 @@ This is end-to-end ML systems work: a detector that operates at gigapixel scale,
 
 ---
 
-<sub>Diagrams in `assets/` are original schematic illustrations of the method, not the source experimental figures. Code and trained weights are private under IIT Madras / SGBC institutional agreements. A technical walkthrough is available on request.</sub>
+<sub>Code and trained weights are private under IIT Madras / SGBC institutional agreements. A technical walkthrough is available on request.</sub>
