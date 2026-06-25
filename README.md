@@ -25,7 +25,7 @@ The system below addresses both: a high-recall detector produces ground truth ch
 
 ## Pipeline overview
 
-![End-to-end pipeline](./assets/full-workflow.png)
+![End-to-end pipeline](./assets/full-workflow_1.png)
 
 The WSI is tiled, astrocytes are detected with YOLOv5, those detections are converted directly into segmentation masks, and a UNet — whose encoder is pre-trained on unlabeled tissue with SimCLR — produces the final per-cell mask used for density and clinical readouts.
 
