@@ -1,119 +1,83 @@
-# Astrocyte Detection & Segmentation at Whole-Slide Scale
+# Self-Supervised Cell Detection and Segmentation in Gigapixel Medical Images
 
 <p align="left">
   <img src="https://img.shields.io/badge/Task-Detection%20%2B%20Segmentation-1565C0?style=flat-square">
-  <img src="https://img.shields.io/badge/Modality-IHC%20%2F%20GFAP-7B1FA2?style=flat-square">
-  <img src="https://img.shields.io/badge/Detection-YOLOv5-EE4C2C?style=flat-square">
-  <img src="https://img.shields.io/badge/Segmentation-UNet%20%2B%20SimCLR-1E88E5?style=flat-square">
-  <img src="https://img.shields.io/badge/SSL-Self--Supervised-6A1B9A?style=flat-square">
+  <img src="https://img.shields.io/badge/Learning-Self--Supervised%20(SimCLR)-6A1B9A?style=flat-square">
+  <img src="https://img.shields.io/badge/Models-YOLOv5%20%7C%20UNet-EE4C2C?style=flat-square">
   <img src="https://img.shields.io/badge/Serving-MLflow%20%2B%20FastAPI-009688?style=flat-square">
-  <img src="https://img.shields.io/badge/code-private%20(institutional%20IP)-555?style=flat-square">
+  <img src="https://img.shields.io/badge/Scale-Gigapixel%20WSI-EF6C00?style=flat-square">
 </p>
 
-> Built at the **Sudha Gopalakrishnan Brain Centre, IIT Madras**, on the institute's large-scale human brain histology archive. This repo documents the system; source and trained weights are held under institutional IP.
+> An end to end deep learning pipeline that detects and segments cells in gigapixel medical images, using self-supervised pre-training to cut the cost of manual labeling. Built on large-scale human tissue imaging at the Sudha Gopalakrishnan Brain Centre, IIT Madras. This repository documents the system and results; source is held under institutional IP.
 
----
+## Why this is interesting for an R&D team
 
-## The problem
-
-Human brain histology is acquired as **gigapixel whole-slide images (WSI)** — a single section can exceed 200,000 × 300,000 pixels. **GFAP-stained astrocytes** must be located and outlined across thousands of such sections to study glial morphology and distribution. Manual annotation is infeasible at that scale, and off-the-shelf cell models fail on the staining and density characteristics of human cortex. Two things make it hard:
-
-- **Annotation cost** — pixel-accurate masks for astrocytes are expensive, so labeled data is scarce.
-- **Morphology** — astrocytes are branching, process-bearing cells that overlap and cluster densely, which is exactly where bounding-box-only detection breaks down.
-
-The system below addresses both: a high-recall detector produces ground truth cheaply, and a **self-supervised** encoder lets a segmentation model learn fine morphology from very few annotated masks.
+- **Self-supervised learning reduces annotation cost.** Pixel-accurate labels are the expensive bottleneck in medical imaging. A contrastive encoder learns from unlabeled tissue first, so the segmentation model trains well from very few labels.
+- **It runs at real scale.** A single image can exceed 200,000 by 300,000 pixels. The pipeline tiles, detects, and segments at that resolution rather than on toy crops.
+- **It ships.** The trained model is packaged with MLflow and served behind a FastAPI inference API, not left as a notebook.
+- **Measured, not asserted.** The best segmentation model reaches a validation loss of 0.0352 and beats a MedSAM baseline (Dice 0.8063).
 
 ## Pipeline overview
 
-![End-to-end pipeline](./assets/full-workflow_1.png)
+![End to end pipeline](./assets/full-workflow_1.png)
 
-The WSI is tiled, astrocytes are detected with YOLOv5, those detections are converted directly into segmentation masks, and a UNet — whose encoder is pre-trained on unlabeled tissue with SimCLR — produces the final per-cell mask used for density and clinical readouts.
+The image is tiled, candidate cells are detected with YOLOv5, those detections are converted directly into segmentation masks, and a UNet whose encoder was pre-trained with SimCLR produces the final mask used for downstream quantification.
 
----
+## Stage 1: Detection (YOLOv5)
 
-## Stage A — Detection (YOLOv5)
+Each tile is processed at 512 by 512. A YOLOv5 detector is trained on hand-curated cell crops under a strict protocol (box only around clearly visible cells, soma visible, no blurring) and validated at an IoU threshold of 0.45. It recovers cells across morphological variants at high recall while keeping false positives low enough that the detections can seed the next stage. The detector is the supervisory signal for segmentation: its boxes become masks instead of being discarded.
 
-The slide is streamed and split into **512 × 512** tiles so detection fits in GPU memory. A YOLOv5 detector is trained on hand-curated GFAP+ astrocyte crops under a strict annotation protocol — *box only around clearly visible astrocytes, soma must be visible, no blurring* — and validated at an **IoU threshold of 0.45**.
-
-Against expert manual annotation the detector reproduces astrocyte locations across morphological variants (stellate, hypertrophic, fibrous), recovering cells at high recall while keeping false positives low enough to serve as training ground truth for the next stage. This detection layer is the **supervisory signal** for segmentation — its boxes become masks rather than being discarded.
-
-## Stage B — Masks directly from detections
+## Stage 2: Masks directly from detections
 
 ![Mask generation](./assets/mask-generation.png)
 
-Instead of a separate weak-label pipeline, segmentation masks are **constructed directly from the detection annotations (COCO format)**. For every bounding box:
+Instead of a separate weak-label pipeline, segmentation masks are built directly from the detection annotations. For each bounding box the crop is extracted, converted to grayscale, gamma corrected to lift the signal, thresholded with Otsu, cleaned of small objects, and pasted back into a full image binary mask. The result is drop-in ground truth for the UNet with no manual pixel labeling.
 
-1. Extract the image crop
-2. Convert to grayscale
-3. Apply **gamma correction (γ = 3)** to lift the GFAP signal
-4. **Otsu threshold** to separate cell from background
-5. Remove small spurious objects
-6. Paste the binary crop back into a full-image mask
-
-The result is a **full-image binary mask** (`0 = background`, `1 = astrocyte`) — drop-in ground truth for UNet, with no manual pixel labeling.
-
-## Stage C — Self-supervised pre-training (SimCLR)
+## Stage 3: Self-supervised pre-training (SimCLR)
 
 ![SimCLR pre-training](./assets/simclr-pipeline.png)
 
-Because annotated masks are scarce, a **ResNet18** encoder is first pre-trained on **unlabeled** brain-tissue tiles using **SimCLR** contrastive learning. Two augmented views of each tile are pushed through a shared encoder and a 512 → 128 MLP projection head, and an **NT-Xent** loss (τ = 0.1) pulls matching views together while pushing others apart.
+Because labels are scarce, a ResNet18 encoder is first pre-trained on unlabeled tissue tiles with SimCLR contrastive learning. Two augmented views of each tile pass through a shared encoder and a 512 to 128 projection head, and an NT-Xent loss (temperature 0.1) pulls matching views together while pushing others apart.
 
 | Setting | Value |
 |---|---|
-| Backbone | ResNet18 → MLP head (512 → 128) |
-| Loss | NT-Xent, τ = 0.1 |
+| Backbone | ResNet18 with MLP projection head (512 to 128) |
+| Loss | NT-Xent, temperature 0.1 |
 | Augmentations | random resized crop (224), flip, color jitter, grayscale, Gaussian blur |
-| Optimizer | LARS · lr 1e-3 · batch 128 · 200 epochs |
+| Optimizer | LARS, learning rate 1e-3, batch 128, 200 epochs |
 
 The learned weights initialize the segmentation encoder, so the segmenter starts already understanding tissue structure.
 
-## Stage D — Segmentation (UNet + SimCLR)
+## Stage 4: Segmentation (UNet with SimCLR encoder)
 
-The segmentation model is a **UNet** whose encoder is the SimCLR-pretrained ResNet18. Four upsampling blocks with **skip connections** from the encoder stages recover spatial detail, and a final upsampling layer returns to the full **512 × 512** resolution. Training uses **`BCEWithLogitsLoss(pos_weight = 10)`** to counter the heavy background/foreground imbalance.
+The segmentation model is a UNet whose encoder is the SimCLR-pretrained ResNet18. Four upsampling blocks with skip connections recover spatial detail, and a final upsampling layer returns to full 512 by 512 resolution. Training uses BCEWithLogitsLoss with a positive weight of 10 to counter heavy background imbalance.
 
 | Setting | Value |
 |---|---|
 | Encoder | ResNet18, initialized from SimCLR |
-| Loss | BCEWithLogitsLoss, pos_weight = 10 |
-| Optimizer | Adam · lr 3e-4 · ReduceLROnPlateau (factor 0.1, patience 3) |
-| Inference | sigmoid → threshold 0.5 (optional multi-checkpoint ensemble) |
-
-Inference applies a sigmoid to the logits; an ensemble that averages probabilities across checkpoints is available for extra robustness. The full encoder/decoder architecture, training setup, and performance are shown in the [end-to-end workflow diagram](#pipeline-overview) above.
-
----
+| Loss | BCEWithLogitsLoss, positive weight 10 |
+| Optimizer | Adam, learning rate 3e-4, ReduceLROnPlateau |
+| Inference | sigmoid then threshold 0.5, optional multi-checkpoint ensemble |
 
 ## Results
 
 | Model | Task | Best metric | Notes |
 |---|---|---|---|
-| **UNet + SimCLR** | Segmentation | **Val loss 0.0352** | best performing; train loss 0.0309 @ epoch 3 |
+| UNet with SimCLR | Segmentation | Validation loss 0.0352 | best performing; train loss 0.0309 at epoch 3 |
 | MedSAM | Segmentation | Dice 0.8063 | baseline comparison |
 
-The best checkpoint is logged to **MLflow** and registered in the model registry.
-
-> **Why segmentation over detection?** With overlapping, densely distributed astrocytes, boxes collide and merge — pixel masks recover the true per-cell shape that morphometrics depend on.
+The best checkpoint is logged to MLflow and registered in the model registry.
 
 ## Deployment
 
-- **Packaging** — the trained model is wrapped with `mlflow.pyfunc` for standardized, versioned inference.
-- **Inference API (FastAPI)** — `/api/health`, `/api/get_mask`, `/api/model/info`, with gamma-correction preprocessing applied before inference. Tile size 512 × 512, threshold 0.5, FP32.
-
-## Clinical application — stroke tissue classification
-
-Segmentation outputs feed a downstream readout:
-
-- estimate **astrocyte density** per region,
-- generate **WSI-level density heatmaps**,
-- classify tissue as **NEGATIVE · SPARSE · DENSE**.
+The trained model is packaged with `mlflow.pyfunc` for standardized, versioned inference and served through a FastAPI API (`/api/health`, `/api/get_mask`, `/api/model/info`) with preprocessing applied before inference. Tile size 512 by 512, threshold 0.5, FP32.
 
 ## Tech stack
 
-`PyTorch` · `YOLOv5` · `SimCLR (contrastive SSL)` · `UNet / ResNet18` · `OpenCV / scikit-image` · `MLflow` · `FastAPI` · `NumPy / pandas` · `CUDA`
+`PyTorch`, `YOLOv5`, `SimCLR (contrastive SSL)`, `UNet / ResNet18`, `OpenCV / scikit-image`, `MLflow`, `FastAPI`, `NumPy / pandas`, `CUDA`
 
 ## Why it matters
 
-This is end-to-end ML systems work: a detector that operates at gigapixel scale, **detection annotations reused as segmentation supervision** (no manual pixel labeling), **self-supervised pre-training** that makes a data-scarce segmentation task tractable, and a packaged serving layer a domain expert can actually use. The same pattern — detect → derive masks → pre-train → segment → quantify — generalizes to most high-resolution biomedical imaging problems.
+This is the full arc that an applied research team cares about: a detector that works at gigapixel scale, detection annotations reused as segmentation supervision so no manual pixel labeling is needed, self-supervised pre-training that makes a data-scarce task tractable, and a packaged serving layer. The same pattern of detect, derive masks, pre-train, segment, quantify generalizes to most high-resolution imaging problems in medicine and biology.
 
----
-
-<sub>Code and trained weights are private under IIT Madras / SGBC institutional agreements. A technical walkthrough is available on request.</sub>
+<sub>Diagrams in `assets/` illustrate the method. Code and trained weights are private under institutional agreements. A technical walkthrough is available on request.</sub>
